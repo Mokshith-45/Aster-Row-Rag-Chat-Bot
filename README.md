@@ -201,7 +201,7 @@ Raw order records contain sensitive fields. The tool now returns an explicit `Cu
 
 Upload the project walkthrough to Google Drive and replace the placeholder with a viewable share link:
 
-[Watch the Aster & Row Support Agent demonstration](PASTE_YOUR_GOOGLE_DRIVE_LINK_HERE)
+[Watch the Aster & Row Support Agent demonstration](https://drive.google.com/file/d/1mq2NL77araPGJfKRQHZa_rBIeVjTD_4e/view?usp=drive_link)
 
 The recording should include a cited policy answer, an order lookup, a multi-turn follow-up, a safe refusal or human handoff, and the evaluation command running successfully.
 
