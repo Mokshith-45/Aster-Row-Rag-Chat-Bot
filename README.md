@@ -237,3 +237,242 @@ Framework choice and quantity of code are not scoring criteria.
 ```
 
 Good luck. Build for reliability, not just for the happy-path demo.
+
+## Implementation
+
+This repository contains a small, deterministic support agent for the Aster & Row mock data. The response layer is intentionally conservative: it uses retrieved evidence and the controlled order tool rather than asking a language model to invent policy or order facts. OpenAI embeddings are configurable through `OPENAI_API_KEY`; local tests and no-key runs use a stable hash embedding fallback.
+
+### Architecture
+
+```text
+POST /chat
+    -> session-isolated bounded memory
+    -> safety and intent router
+            -> heading-aware RAG retriever
+            -> allowlisted order lookup
+    -> grounded response formatter
+    -> structured response and optional debug trace
+```
+
+The RAG loader parses the observed YAML front matter, preserves every metadata field, filename, and heading path, and stores heading-aware chunks in ChromaDB when a persistence directory is configured. Ranking combines semantic similarity, lexical overlap, intent signals, and metadata authority. Active official customer documents are preferred; draft, internal, and superseded material is not customer authority. Current official contradictions are returned as conflicts instead of being silently resolved.
+
+The order tool reads one requested order into an explicit `CustomerSafeOrder` schema. Customer identity and all `internal` fields are never returned. Carrier, tracking, and ETA fields are suppressed for cancelled and returned orders because the supplied dataset documents those fields as potentially stale.
+
+The agent stores at most 12 recent messages per session. Session IDs isolate histories, and order follow-ups reuse an order ID only from the same session. Prompt extraction, secret requests, internal-data requests, unsupported actions, missing order IDs, insufficient evidence, and human-review conditions have explicit routes.
+
+## Setup
+
+Python 3.11+ is required. From a clean clone:
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
+```
+
+`.env` is optional for local deterministic operation. If `OPENAI_API_KEY` is set, the RAG embedding provider can use `OPENAI_EMBEDDING_MODEL`; no key is hard-coded or required by the test suite. The chat response layer does not send the entire corpus or orders file to a model.
+
+## Ingest and run
+
+Index the unchanged knowledge base:
+
+```powershell
+python scripts/ingest.py
+```
+
+Ingestion uses deterministic chunk IDs and Chroma `upsert`, so repeating it is idempotent. Run the API:
+
+```powershell
+python -m app.main
+```
+
+The service is available at `http://127.0.0.1:8000`. Health check:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health
+```
+
+Chat request:
+
+```powershell
+Invoke-RestMethod -Method Post http://127.0.0.1:8000/chat -ContentType 'application/json' -Body '{"session_id":"demo","message":"Where is ORD-1007?","debug":true}'
+```
+
+The response contains `answer`, `route`, `sources`, `handoff`, `tool_calls`, and (when requested) a trace containing retrieval scores and sanitized tool summaries.
+
+## Tests and evaluation
+
+Run all regression tests:
+
+```powershell
+python -m pytest -q tests
+```
+
+Run every supplied visible case plus seven original cases:
+
+```powershell
+# Aster & Row Support Agent
+
+A small, deterministic customer-support agent for policy, product, shipping, and mock order questions. It demonstrates reliable RAG, safe order lookups, bounded multi-turn memory, prompt-injection resistance, source citations, abstention, and human handoff behavior.
+
+## Quick Start
+
+From a clean clone on Windows PowerShell:
+
+```powershell
+cd C:\path\to\agent
+py -3.13 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
+python -m scripts.ingest
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Open `http://127.0.0.1:8000` in a browser. The index is also created automatically on the first retrieval, so the explicit ingest command is useful but optional.
+
+Run tests in another terminal from the repository root:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m pytest -q
+```
+
+Run the complete deterministic evaluation suite:
+
+```powershell
+python -m scripts.evaluate
+```
+
+The API also exposes `GET /health` and `POST /chat`. A chat request contains `session_id`, `message`, and the optional `debug` boolean.
+
+## Configuration
+
+Copy `.env.example` to `.env`. No environment variable is required for local operation.
+
+| Variable | Required | Purpose | Default |
+|---|---|---|---|
+| `OPENAI_API_KEY` | No | Enables OpenAI embeddings when set to a real key | Local hash embeddings |
+| `OPENAI_EMBEDDING_MODEL` | No | OpenAI embedding model | `text-embedding-3-small` |
+
+The project never requires an API key for tests or the demo. Do not commit `.env` or credentials.
+
+## Technical Choices
+
+- **Framework:** FastAPI with Uvicorn.
+- **Response model:** deterministic Python orchestration in `app/agent.py`; no generative model is required by the current path.
+- **Embeddings:** stable local hash embeddings by default; optional OpenAI `text-embedding-3-small` embeddings with automatic local fallback.
+- **Retrieval:** heading-aware Markdown chunks ranked using lexical relevance, embedding similarity, metadata authority, and intent weighting.
+- **Storage:** source Markdown and JSON files remain the source of truth. ChromaDB persistence is optional and stored in the ignored `.chroma/` directory; tests use in-memory deterministic retrieval.
+- **Memory:** bounded, per-session in-memory message history.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    Browser["app/static/index.html"] -->|POST /chat| API["FastAPI app/main.py"]
+    API --> Agent["SupportAgent"]
+    Agent --> Memory["SessionMemory"]
+    Agent --> Router{"Intent and safety routing"}
+    Router --> RAG["RAGRetriever"]
+    Router --> Order["OrderLookupTool"]
+    Router --> Refusal["Privacy / injection refusal"]
+    Router --> Abstain["Clarification / abstention / handoff"]
+    RAG --> Loader["YAML front matter loader"]
+    Loader --> Chunker["Heading-aware chunker"]
+    Chunker --> Embed["Hash or OpenAI embeddings"]
+    Embed --> KB["knowledge-base/*.md"]
+    Order --> Orders["data/orders.json"]
+    Agent --> Trace["Sanitized JSON trace"]
+```
+
+For a policy question, the agent retrieves relevant chunks, prefers active official customer-facing documents, detects known authoritative conflicts, and returns citations containing filename and heading. For an order question, it extracts and normalizes the order ID, performs one lookup, and exposes only the customer-safe schema. Missing evidence, unknown orders, unsupported actions, privacy requests, and conflicts receive a safe response and, where appropriate, a human handoff.
+
+## Evaluation Results
+
+Command used:
+
+```powershell
+python -m scripts.evaluate
+```
+
+The current final run passed **22/22 cases**. The evaluator reports each case individually and groups results by behavior category:
+
+| Category | Passed | Total |
+|---|---:|---:|
+| retrieval | 2 | 2 |
+| multi-source-grounding | 1 | 1 |
+| conversation | 1 | 1 |
+| groundedness | 3 | 3 |
+| tool-use | 3 | 3 |
+| tool-reliability | 3 | 3 |
+| privacy | 2 | 2 |
+| prompt-security | 1 | 1 |
+| abstention | 1 | 1 |
+| source-conflict | 1 | 1 |
+| clarification | 1 | 1 |
+| handoff | 1 | 1 |
+| multi-turn | 1 | 1 |
+| citation | 1 | 1 |
+| **Total** | **22** | **22** |
+
+An early baseline run was not captured before the reliability fixes were added, so no baseline number is claimed here. For a formal submission, run the original implementation and archive its evaluator output as the baseline rather than estimating it.
+
+## Bug Diary
+
+The following failures were reproduced during development and are covered by regression tests:
+
+1. **Superseded return policy could outrank the current policy.** A standard return query could retrieve the legacy 60-day document first. The root cause was ranking that considered text similarity without enough metadata authority. Retrieval now scores active, official, customer-facing documents higher and applies return-intent weighting. Covered by `test_active_returns_policy_beats_superseded_policy` in `tests/test_rag.py` and the `standard-return-window` evaluation case.
+
+2. **Cancelled orders could expose stale delivery data.** The JSON snapshot retained carrier and estimated-delivery fields after cancellation. The lookup tool now treats `status` as authoritative and suppresses shipping fields for cancelled and returned orders. Covered by `test_cancelled_order_suppresses_stale_shipping_fields` and the `cancelled-order-stale-eta` evaluation case.
+
+3. **A follow-up order question could lose its order ID.** “When will it arrive?” has no identifier by itself. The agent now searches recent messages in the same bounded session and refuses to guess when no ID exists. Covered by `test_order_follow_up_uses_memory`, `test_sessions_are_isolated`, and the `missing-order-id` evaluation case.
+
+4. **Two current product sources gave contradictory dishwasher guidance.** Silently selecting one answer would be unsafe. Retrieval now detects the known active-source conflict and the agent surfaces both claims with human confirmation. Covered by `test_active_authoritative_product_sources_report_conflict`, `test_conflict_recommends_human_support`, and `genuine-active-source-conflict`.
+
+5. **Internal order fields could be requested directly.** The raw order records include email, address, risk score, and internal notes. The tool now constructs an explicit `CustomerSafeOrder` object instead of returning raw records. Covered by `test_private_and_internal_fields_are_not_in_tool_result` and `order-data-privacy`.
+
+## Demonstration Video
+
+Upload the 2–4 minute recording to Google Drive, set its sharing permission so reviewers can view it, then replace the placeholder below with the share link:
+
+[Watch the Aster & Row Support Agent demonstration](PASTE_YOUR_GOOGLE_DRIVE_LINK_HERE)
+
+The recording should show a cited knowledge-base answer, an order lookup, a multi-turn follow-up, a safe refusal or handoff, and `python -m scripts.evaluate` running successfully.
+
+## Known Limitations
+
+- Session memory is in process and disappears when the server restarts; it is not suitable for multiple workers.
+- The default hash embedding provider is useful for deterministic local tests but is less semantically capable than a production embedding service.
+- The current response layer is rule-based and does not generate flexible natural-language answers for arbitrary paraphrases.
+- Conflict detection currently targets known claim pairs rather than a general contradiction model.
+- Order possession is treated as authentication because this is mock assignment data; production systems need identity verification and authorization.
+- There is no real cancellation, refund, replacement, address-change, or escalation backend.
+- Chroma persistence is local and has no lifecycle, locking, monitoring, or production backup strategy.
+
+Before production, I would add authenticated durable sessions, a real order-service adapter, broader retrieval and contradiction tests, provider monitoring, rate limiting, structured tracing with retention controls, and human-support integration.
+
+## AI Coding Tools
+
+GitHub Copilot was used to inspect the repository, trace the request and retrieval flows, draft focused implementation changes, and help review test coverage and documentation. The final implementation was validated with the repository test suite and deterministic evaluator.
+
+One incomplete AI-generated suggestion was to pass the complete `orders.json` dataset into the model context to make order questions easier. That would violate the assignment’s privacy and data-minimization requirements. The implemented design performs an ID-specific lookup and returns only the explicit customer-safe schema.
+
+## Repository Map
+
+- `app/main.py`: FastAPI routes and dependency wiring.
+- `app/agent.py`: safety checks, routing, memory use, RAG responses, order responses, and handoffs.
+- `app/memory.py`: bounded isolated session history.
+- `app/rag/loader.py`: Markdown and YAML front matter parsing.
+- `app/rag/chunker.py`: heading-aware chunking.
+- `app/rag/embeddings.py`: local and optional OpenAI embeddings.
+- `app/rag/retriever.py`: scoring, authority precedence, persistence, and conflict detection.
+- `app/tools/order_lookup.py`: normalized, privacy-safe order lookup.
+- `app/observability/logger.py`: sanitized JSON debug traces.
+- `scripts/ingest.py`: explicit knowledge-base indexing.
+- `scripts/evaluate.py`: visible and custom deterministic evaluation.
+- `tests/`: unit and API regression tests.
+- `knowledge-base/`: policy and product sources.
+- `data/`: mock orders and field definitions.
